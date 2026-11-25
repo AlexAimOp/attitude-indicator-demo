@@ -1,0 +1,2448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Implement Attitude Indicator</title>
+  <style>
+    /* Tokens, page shell, combined card, blade axes, grade UI, horizontal strips, arch SVG */
+    :root {
+      --gi-bg: #0f1419;
+      --gi-border: #2a3444;
+      --gi-text: #e8eef7;
+      --gi-muted: #8b98a8;
+      --gi-target: #00d978;
+      --gi-marker: #141414;
+      --gi-tolerance: rgba(255, 255, 255, 0.14);
+      --gi-scale-gradient: linear-gradient(
+        180deg,
+        #172554 0%,
+        #1d4ed8 10%,
+        #3b82f6 20%,
+        #60a5fa 34%,
+        #38bdf8 42%,
+        #22d3ee 46%,
+        #0f766e 48.0%,
+        #059669 48.8%,
+        #00d978 49.5%,
+        #00ee9c 50%,
+        #00b86b 50.4%,
+        #4d7c0f 51.8%,
+        #eab308 56%,
+        #f97316 68%,
+        #ef4444 80%,
+        #991b1b 100%
+      );
+      --gi-strip-width: 26px;
+      --gi-height: 220px;
+      /* Yaw + roll horizontal: red at ± limits, blue mid-band, green at center */
+      --gi-scale-gradient-h: linear-gradient(
+        90deg,
+        #991b1b 0%,
+        #dc2626 10%,
+        #2563eb 24%,
+        #1d4ed8 34%,
+        #0ea5e9 41%,
+        #38bdf8 46%,
+        #00d978 49%,
+        #00ee9c 50%,
+        #00d978 51%,
+        #38bdf8 54%,
+        #0ea5e9 59%,
+        #1d4ed8 66%,
+        #2563eb 76%,
+        #dc2626 90%,
+        #991b1b 100%
+      );
+      --gi-h-bar-width: 220px;
+
+      /*
+       * Two main columns: left = indicator bars (stacked); right = values + menus (stacked).
+       * Tune via “Layout (grid)” panel or here.
+       */
+      --blade-row-cols: minmax(220px, 1fr) minmax(168px, 240px);
+      --blade-row-col-gap: 28px;
+      --blade-layout-row-gap: 20px;
+    }
+
+    /* —— Page shell —— */
+    body.app {
+      margin: 0;
+      background: #080b0f;
+      min-height: 100vh;
+      box-sizing: border-box;
+    }
+
+    .instrument-dashboard {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-start;
+      justify-content: center;
+      gap: 24px;
+      padding: 24px;
+      box-sizing: border-box;
+      min-height: 100vh;
+    }
+
+    /* Host app embed (iframe ?embed=1 or #embed): compact, no layout tuner, no scrollbars */
+    html.embed {
+      overflow: hidden;
+      height: 100%;
+    }
+
+    html.embed body.app {
+      min-height: auto;
+      overflow: hidden;
+    }
+
+    html.embed .instrument-dashboard {
+      padding: 10px 12px 12px;
+      min-height: auto;
+      justify-content: flex-start;
+      align-items: flex-start;
+      overflow: hidden;
+    }
+
+    html.embed .blade-layout-tuner {
+      display: none !important;
+    }
+
+    /* —— Combined card: bars left | value / menus right —— */
+    .grade-indicator--combined {
+      min-width: 320px;
+      max-width: 760px;
+    }
+
+    .grade-indicator--combined > .grade-indicator__main {
+      flex-wrap: wrap;
+    }
+
+    /*
+     * 3×2 grid: each row = one gauge (left) + its controls (right).
+     * align-items: center vertically centers the bar strip with the value block in each row.
+     */
+    .blade-instrument__layout {
+      display: grid;
+      direction: ltr;
+      grid-template-columns: var(--blade-row-cols);
+      grid-auto-rows: auto;
+      column-gap: var(--blade-row-col-gap);
+      row-gap: var(--blade-layout-row-gap);
+      align-items: center;
+      width: 100%;
+    }
+
+    .blade-instrument__layout > .blade-instrument__gauge-block {
+      justify-self: center;
+      min-width: 0;
+    }
+
+    .blade-instrument__layout > .blade-sidebar-section {
+      justify-self: center;
+      width: 100%;
+      min-width: 0;
+      padding-bottom: 14px;
+      border-bottom: 1px solid rgba(42, 52, 68, 0.65);
+    }
+
+    .blade-instrument__layout > .blade-sidebar-section:not(#gradeIndicatorControls) {
+      max-width: var(--gi-h-bar-width);
+    }
+
+    .blade-instrument__layout > .blade-sidebar-section:last-child {
+      padding-bottom: 0;
+      border-bottom: none;
+    }
+
+    /* Yaw / roll: value readout centered on the bar’s horizontal axis (same width column as strip) */
+    .blade-axis__title-row {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: baseline;
+      column-gap: 8px;
+    }
+
+    .blade-axis__title-row .blade-axis__name {
+      grid-column: 1;
+      justify-self: start;
+    }
+
+    .blade-axis__title-row .grade-indicator__value {
+      grid-column: 2;
+      justify-self: center;
+      transition: color 0.12s ease;
+    }
+
+    /* Implement: title + value centered like yaw/roll */
+    #gradeIndicatorControls .grade-indicator__header {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: baseline;
+      column-gap: 8px;
+    }
+
+    #gradeIndicatorControls .grade-indicator__title {
+      grid-column: 1;
+      justify-self: start;
+    }
+
+    #gradeIndicatorControls #giValue {
+      grid-column: 2;
+      justify-self: center;
+    }
+
+    .blade-axis__sidebar {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .blade-axis__gauge {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      min-width: 0;
+    }
+
+    .blade-instrument__gauge-block {
+      width: 100%;
+      max-width: var(--gi-h-bar-width);
+    }
+
+    .blade-instrument__gauge-block#gradeIndicator {
+      max-width: 420px;
+    }
+
+    @media (max-width: 600px) {
+      .blade-instrument__layout {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* Collapsible: live-edit --blade-* variables without touching the file */
+    .blade-layout-tuner {
+      position: fixed;
+      bottom: 12px;
+      right: 12px;
+      z-index: 9999;
+      max-width: min(440px, calc(100vw - 24px));
+      padding: 10px 12px;
+      font-size: 11px;
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      color: var(--gi-text);
+      background: rgba(15, 20, 28, 0.96);
+      border: 1px solid var(--gi-border);
+      border-radius: 10px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+    }
+
+    .blade-layout-tuner summary {
+      cursor: pointer;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      color: var(--gi-muted);
+      list-style: none;
+    }
+
+    .blade-layout-tuner summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .blade-layout-tuner[open] summary {
+      margin-bottom: 10px;
+    }
+
+    .blade-layout-tuner__hint {
+      margin: 0 0 10px;
+      font-size: 10px;
+      line-height: 1.45;
+      color: var(--gi-muted);
+    }
+
+    .blade-layout-tuner label {
+      display: block;
+      margin-top: 10px;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #6b7a8c;
+    }
+
+    .blade-layout-tuner label:first-of-type {
+      margin-top: 0;
+    }
+
+    .blade-layout-tuner input[type="text"] {
+      display: block;
+      width: 100%;
+      margin-top: 4px;
+      padding: 6px 8px;
+      box-sizing: border-box;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px;
+      color: var(--gi-text);
+      background: #1a2330;
+      border: 1px solid var(--gi-border);
+      border-radius: 6px;
+    }
+
+    .blade-layout-tuner input[type="text"]:focus {
+      outline: none;
+      border-color: rgba(0, 217, 120, 0.55);
+    }
+
+    .grade-indicator--combined .grade-indicator--embedded {
+      border: none;
+      background: transparent;
+      padding: 0;
+      min-width: 0;
+      box-shadow: none;
+    }
+
+    .grade-indicator--combined #gradeIndicator .grade-indicator__controls {
+      border-left: none;
+      padding-left: 0;
+      width: 100%;
+    }
+
+    /* —— Shared axis row —— */
+    .blade-axis {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .blade-axis__name {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--gi-muted);
+    }
+
+    .blade-axis__title-row .grade-indicator__value {
+      font-size: 15px;
+    }
+
+    .blade-axis .grade-indicator__scale-block {
+      align-self: stretch;
+    }
+
+    .blade-controls-group {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid rgba(42, 52, 68, 0.75);
+    }
+
+    .blade-controls-group:last-child {
+      padding-bottom: 0;
+      border-bottom: none;
+    }
+
+    .blade-axis__sidebar .blade-controls-group {
+      border-bottom: none;
+      padding-bottom: 0;
+    }
+
+    .blade-controls-group__title {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #6b7a8c;
+    }
+
+    /* —— Grade / scale chrome —— */
+    .grade-indicator {
+      display: inline-flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      color: var(--gi-text);
+      background: var(--gi-bg);
+      border: 1px solid var(--gi-border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      min-width: 300px;
+      box-sizing: border-box;
+    }
+
+    .grade-indicator__header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+    }
+
+    .grade-indicator__title {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--gi-muted);
+    }
+
+    .grade-indicator__value {
+      font-variant-numeric: tabular-nums;
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .grade-indicator__value--ok { color: var(--gi-target); }
+    .grade-indicator__value--warn { color: #f5c542; }
+    .grade-indicator__value--bad { color: #ff6b6b; }
+    .grade-indicator__value--warn.grade-indicator__value--above { color: #7ab8ff; }
+    .grade-indicator__value--bad.grade-indicator__value--above { color: #3b82f6; }
+
+    .grade-indicator__main {
+      display: flex;
+      flex-direction: row;
+      align-items: stretch;
+      gap: 12px;
+    }
+
+    .grade-indicator__body {
+      display: flex;
+      align-items: stretch;
+      gap: 10px;
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+
+    .grade-indicator__labels {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      font-size: 10px;
+      color: var(--gi-muted);
+      padding: 4px 0;
+      text-align: right;
+      min-width: 2.75em;
+    }
+
+    .grade-indicator__label--pos {
+      color: #8ec5ff;
+      font-weight: 600;
+    }
+
+    .grade-indicator__label--zero {
+      color: #34e8b8;
+      font-weight: 600;
+    }
+
+    .grade-indicator__label--neg {
+      color: #ff8a8a;
+      font-weight: 600;
+    }
+
+    .grade-indicator__strip-wrap {
+      position: relative;
+      flex: 0 0 auto;
+      width: var(--gi-strip-width);
+      height: var(--gi-height);
+      min-height: 120px;
+    }
+
+    .grade-indicator__strip {
+      position: absolute;
+      inset: 0;
+      border-radius: 5px;
+      background: var(--gi-scale-gradient);
+      border: 1px solid rgba(0, 0, 0, 0.35);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+      overflow: hidden;
+    }
+
+    .grade-indicator__strip::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 50%;
+      transform: translateY(-50%);
+      height: 48px;
+      border-radius: 4px;
+      pointer-events: none;
+      z-index: 0;
+      opacity: 0;
+      background: radial-gradient(
+        ellipse 130% 100% at 50% 50%,
+        rgba(0, 240, 150, 0.82) 0%,
+        rgba(0, 200, 130, 0.38) 42%,
+        transparent 72%
+      );
+    }
+
+    .grade-indicator--on-target .grade-indicator__strip::before,
+    .blade-axis.grade-indicator--on-target .grade-indicator__strip::before {
+      animation: gi-on-target-bar-center 1s ease-in-out infinite;
+    }
+
+    .grade-indicator__ticks {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    .grade-indicator__tick {
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 1px;
+      background: rgba(0, 0, 0, 0.2);
+    }
+
+    .grade-indicator__tick--major {
+      background: rgba(0, 0, 0, 0.32);
+    }
+
+    .grade-indicator__tolerance {
+      position: absolute;
+      left: 0;
+      right: 0;
+      background: var(--gi-tolerance);
+      border-top: 1px solid rgba(255, 255, 255, 0.28);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.28);
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    @keyframes gi-on-target-bar-center {
+      0%, 100% { opacity: 0.35; filter: brightness(1); }
+      50% { opacity: 0.95; filter: brightness(1.2); }
+    }
+
+    @keyframes gi-on-target-center-label {
+      0%, 100% {
+        color: #34e8b8;
+        text-shadow: 0 0 10px rgba(0, 230, 155, 0.65);
+      }
+      50% {
+        color: #7af5d4;
+        text-shadow:
+          0 0 14px rgba(0, 240, 165, 1),
+          0 0 26px rgba(0, 200, 135, 0.72);
+      }
+    }
+
+    .grade-indicator--on-target .grade-indicator__label--zero,
+    .blade-axis.grade-indicator--on-target .grade-indicator__label--zero {
+      animation: gi-on-target-center-label 1s ease-in-out infinite;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .grade-indicator--on-target .grade-indicator__strip::before,
+      .grade-indicator--on-target .grade-indicator__label--zero,
+      .blade-axis.grade-indicator--on-target .grade-indicator__strip::before,
+      .blade-axis.grade-indicator--on-target .grade-indicator__label--zero {
+        animation: none;
+      }
+      .grade-indicator--on-target .grade-indicator__strip::before,
+      .blade-axis.grade-indicator--on-target .grade-indicator__strip::before {
+        opacity: 0.55;
+        filter: none;
+      }
+      .grade-indicator--on-target .grade-indicator__label--zero,
+      .blade-axis.grade-indicator--on-target .grade-indicator__label--zero {
+        text-shadow: 0 0 12px rgba(0, 225, 150, 0.55);
+      }
+    }
+
+    .grade-indicator__marker {
+      position: absolute;
+      pointer-events: none;
+      z-index: 2;
+    }
+
+    .grade-indicator__marker--line {
+      left: 5px;
+      right: 5px;
+      width: auto;
+      height: 3px;
+      margin: 0;
+      padding: 0;
+      border: none;
+      border-radius: 2px;
+      background: var(--gi-marker);
+      box-shadow:
+        0 0 0 1px rgba(255, 255, 255, 0.2),
+        0 1px 3px rgba(0, 0, 0, 0.55);
+      transform: translateY(-50%);
+    }
+
+    .grade-indicator__marker--arrow-down {
+      left: 50%;
+      right: auto;
+      width: 0;
+      height: 0;
+      margin: 0;
+      padding: 0;
+      border: none;
+      border-left: 6px solid transparent;
+      border-right: 6px solid transparent;
+      border-top: 10px solid var(--gi-marker);
+      border-bottom: none;
+      background: transparent;
+      border-radius: 0;
+      filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.65));
+    }
+
+    .grade-indicator__marker--arrow-up {
+      left: 50%;
+      right: auto;
+      width: 0;
+      height: 0;
+      margin: 0;
+      padding: 0;
+      border: none;
+      border-left: 6px solid transparent;
+      border-right: 6px solid transparent;
+      border-bottom: 10px solid var(--gi-marker);
+      border-top: none;
+      background: transparent;
+      border-radius: 0;
+      filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.65));
+    }
+
+    .grade-indicator__controls {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: stretch;
+      gap: 10px;
+      flex: 0 0 auto;
+      width: 156px;
+      padding-left: 10px;
+      border-left: 1px solid rgba(42, 52, 68, 0.9);
+      box-sizing: border-box;
+    }
+
+    .grade-indicator__control {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+      width: 100%;
+    }
+
+    .grade-indicator__control-label {
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--gi-muted);
+    }
+
+    .grade-indicator__select {
+      appearance: none;
+      background: #1a2330;
+      border: 1px solid var(--gi-border);
+      border-radius: 6px;
+      color: var(--gi-text);
+      font-size: 11px;
+      font-family: inherit;
+      padding: 5px 26px 5px 8px;
+      width: 100%;
+      cursor: pointer;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238b98a8' d='M3 4.5L6 8l3-3.5'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 6px center;
+    }
+
+    .grade-indicator__select:hover { border-color: #3d4d62; }
+    .grade-indicator__select:focus {
+      outline: none;
+      border-color: rgba(0, 217, 120, 0.55);
+      box-shadow: 0 0 0 2px rgba(0, 217, 120, 0.15);
+    }
+
+    .grade-indicator__input {
+      background: #1a2330;
+      border: 1px solid var(--gi-border);
+      border-radius: 6px;
+      color: var(--gi-text);
+      font-size: 11px;
+      font-family: inherit;
+      font-variant-numeric: tabular-nums;
+      padding: 5px 8px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    .grade-indicator__input::placeholder { color: #5c6a7a; }
+    .grade-indicator__input:hover { border-color: #3d4d62; }
+    .grade-indicator__input:focus {
+      outline: none;
+      border-color: rgba(0, 217, 120, 0.55);
+      box-shadow: 0 0 0 2px rgba(0, 217, 120, 0.15);
+    }
+
+    .grade-indicator__value-row {
+      display: flex;
+      flex-direction: row;
+      align-items: stretch;
+      gap: 6px;
+      width: 100%;
+    }
+
+    .grade-indicator__value-row .grade-indicator__input {
+      flex: 1;
+      min-width: 0;
+      width: auto;
+    }
+
+    .grade-indicator__apply {
+      flex: 0 0 auto;
+      margin: 0;
+      padding: 5px 8px;
+      border-radius: 6px;
+      border: 1px solid var(--gi-border);
+      background: linear-gradient(180deg, #243044 0%, #1a2330 100%);
+      color: var(--gi-text);
+      font-family: inherit;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .grade-indicator__apply:hover {
+      border-color: #3d4d62;
+      background: linear-gradient(180deg, #2c3a50 0%, #1f2938 100%);
+    }
+
+    .grade-indicator__apply:focus {
+      outline: none;
+      border-color: rgba(0, 217, 120, 0.55);
+      box-shadow: 0 0 0 2px rgba(0, 217, 120, 0.15);
+    }
+
+    .grade-indicator__apply:active { transform: translateY(0.5px); }
+
+    /* —— Horizontal strips (yaw + roll) —— */
+    .blade-axis.grade-indicator--horizontal {
+      min-width: 0;
+    }
+
+    /* Roll: arched track (SVG), matches yaw bar width */
+    .blade-axis__arch-wrap {
+      width: 100%;
+      max-width: var(--gi-h-bar-width);
+      height: 48px;
+      min-height: 48px;
+      position: relative;
+    }
+
+    .blade-axis__arch-svg {
+      display: block;
+      width: 100%;
+      height: 48px;
+      overflow: visible;
+    }
+
+    .blade-axis__arch-path {
+      filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
+    }
+
+    .blade-axis--on-target .blade-axis__arch-path {
+      animation: gi-arch-on-target 1s ease-in-out infinite;
+    }
+
+    @keyframes gi-arch-on-target {
+      0%,
+      100% {
+        filter:
+          drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45))
+          drop-shadow(0 0 6px rgba(0, 230, 155, 0.35));
+      }
+      50% {
+        filter:
+          drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45))
+          drop-shadow(0 0 14px rgba(0, 240, 165, 0.65));
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .blade-axis--on-target .blade-axis__arch-path {
+        animation: none;
+        filter:
+          drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45))
+          drop-shadow(0 0 8px rgba(0, 225, 150, 0.45));
+      }
+    }
+
+    .blade-axis__arch-tol {
+      pointer-events: none;
+    }
+
+    /* Roll: pull ± labels below the arch stroke so they aren’t covered */
+    .blade-axis--roll .grade-indicator__scale-block {
+      gap: 14px;
+    }
+
+    .blade-axis--roll .grade-indicator__labels--horizontal {
+      margin-top: 4px;
+    }
+
+    [data-ai-marker] .blade-axis__arch-marker-line {
+      stroke: #141414;
+      stroke-width: 2.5;
+      stroke-linecap: round;
+    }
+
+    [data-ai-marker] .blade-axis__arch-marker-arrow {
+      fill: #141414;
+    }
+
+    .grade-indicator__scale-block {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 6px;
+      width: var(--gi-h-bar-width);
+      max-width: 100%;
+      align-self: center;
+    }
+
+    .grade-indicator__body--horizontal {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 10px;
+    }
+
+    .grade-indicator__strip--horizontal {
+      background: var(--gi-scale-gradient-h);
+    }
+
+    .grade-indicator__body--horizontal .grade-indicator__strip-wrap {
+      width: 100%;
+      height: var(--gi-strip-width);
+      min-height: unset;
+      min-width: 0;
+    }
+
+    .grade-indicator__strip--horizontal::before {
+      left: 50%;
+      right: auto;
+      top: 0;
+      bottom: 0;
+      transform: translateX(-50%);
+      width: 52px;
+      height: 100%;
+      background: radial-gradient(
+        ellipse 100% 130% at 50% 50%,
+        rgba(0, 240, 150, 0.82) 0%,
+        rgba(0, 200, 130, 0.38) 42%,
+        transparent 72%
+      );
+    }
+
+    .grade-indicator__labels--horizontal {
+      flex-direction: row;
+      justify-content: space-between;
+      align-items: center;
+      width: 100%;
+      min-width: 0;
+      padding: 0 2px;
+      text-align: center;
+    }
+
+    .grade-indicator__labels--horizontal .grade-indicator__label--neg {
+      text-align: left;
+    }
+
+    .grade-indicator__labels--horizontal .grade-indicator__label--pos {
+      text-align: right;
+    }
+
+    .grade-indicator__body--horizontal .grade-indicator__tick {
+      left: auto;
+      right: auto;
+      top: 0;
+      bottom: 0;
+      width: 1px;
+      height: auto;
+    }
+
+    .grade-indicator__body--horizontal .grade-indicator__tolerance {
+      top: 0;
+      bottom: 0;
+      right: auto;
+      height: auto;
+      border-top: none;
+      border-bottom: none;
+      border-left: 1px solid rgba(255, 255, 255, 0.28);
+      border-right: 1px solid rgba(255, 255, 255, 0.28);
+    }
+
+    .grade-indicator__marker--line-h {
+      left: auto;
+      right: auto;
+      top: 5px;
+      bottom: 5px;
+      width: 3px;
+      height: auto;
+      transform: translateX(-50%);
+    }
+
+    /* Nose-right (positive): marker on right, arrow points left toward center */
+    .grade-indicator__marker--arrow-left {
+      width: 0;
+      height: 0;
+      margin: 0;
+      padding: 0;
+      top: 50%;
+      left: auto;
+      border-radius: 0;
+      background: transparent;
+      border: none;
+      border-top: 6px solid transparent;
+      border-bottom: 6px solid transparent;
+      border-right: 10px solid var(--gi-marker);
+      filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.65));
+    }
+
+    /* Nose-left (negative): arrow points right toward center */
+    .grade-indicator__marker--arrow-right {
+      width: 0;
+      height: 0;
+      margin: 0;
+      padding: 0;
+      top: 50%;
+      left: auto;
+      border-radius: 0;
+      background: transparent;
+      border: none;
+      border-top: 6px solid transparent;
+      border-bottom: 6px solid transparent;
+      border-left: 10px solid var(--gi-marker);
+      filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.65));
+    }
+  </style>
+</head>
+<body class="app">
+  <script>
+    (function () {
+      var q = typeof location !== "undefined" && location.search ? location.search : "";
+      var h = typeof location !== "undefined" ? location.hash : "";
+      if (/[?&]embed=1(?:&|$)/.test(q) || h === "#embed") {
+        document.documentElement.classList.add("embed");
+      }
+    })();
+  </script>
+  <main class="instrument-dashboard">
+    <div
+      class="grade-indicator grade-indicator--combined"
+      id="bladeAttitudeIndicator"
+      data-demo="true"
+    >
+      <div class="grade-indicator__header">
+        <span class="grade-indicator__title">Implement Attitude Indicator</span>
+      </div>
+
+      <div class="grade-indicator__main">
+        <div class="blade-instrument__layout">
+            <div
+              id="bladeAxisYaw"
+              class="blade-axis blade-axis--yaw grade-indicator--horizontal blade-instrument__gauge-block"
+              data-range="20"
+              data-tolerance="0.75"
+              data-current="-4.1"
+              data-increment="1"
+              data-value-increment="0.1"
+              data-target-angle="0"
+            >
+              <div class="blade-axis__gauge">
+                <div class="grade-indicator__body grade-indicator__body--horizontal">
+                  <div class="grade-indicator__scale-block">
+                    <div class="grade-indicator__strip-wrap" data-ai-strip>
+                      <div class="grade-indicator__strip grade-indicator__strip--horizontal" aria-hidden="true">
+                        <div class="grade-indicator__ticks" data-ai-ticks></div>
+                        <div class="grade-indicator__tolerance" data-ai-tol></div>
+                        <div class="grade-indicator__marker grade-indicator__marker--line" data-ai-marker></div>
+                      </div>
+                    </div>
+                    <div class="grade-indicator__labels grade-indicator__labels--horizontal">
+                      <span class="grade-indicator__label--neg" data-ai-bot>20.0° L</span>
+                      <span class="grade-indicator__label--zero" data-ai-mid>0.0°</span>
+                      <span class="grade-indicator__label--pos" data-ai-top>20.0° R</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="blade-axis__sidebar blade-sidebar-section">
+              <div class="blade-axis__title-row">
+                <span class="blade-axis__name">Yaw</span>
+                <span class="grade-indicator__value" data-ai-readout="" data-axis="bladeAxisYaw">4.1° L</span>
+              </div>
+              <div class="blade-controls-group" data-blade-controls="yaw">
+                <div class="grade-indicator__control">
+                  <span class="grade-indicator__control-label">Scale</span>
+                  <select class="grade-indicator__select" data-ai-increment aria-label="Yaw scale increment"></select>
+                </div>
+                <div class="grade-indicator__control">
+                  <span class="grade-indicator__control-label">Value</span>
+                  <div class="grade-indicator__value-row">
+                    <input type="text" class="grade-indicator__input" data-ai-value-step inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Yaw readout step in degrees" placeholder="step" />
+                    <button type="button" class="grade-indicator__apply" data-ai-value-apply>Apply</button>
+                  </div>
+                </div>
+                <div class="grade-indicator__control">
+                  <span class="grade-indicator__control-label">Target</span>
+                  <div class="grade-indicator__value-row">
+                    <input type="text" class="grade-indicator__input" data-ai-target inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Yaw target at center in degrees" placeholder="0" />
+                    <button type="button" class="grade-indicator__apply" data-ai-target-apply>Apply</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div
+              id="bladeAxisRoll"
+              class="blade-axis blade-axis--roll grade-indicator--horizontal blade-instrument__gauge-block"
+              data-range="15"
+              data-tolerance="0.5"
+              data-current="2.3"
+              data-increment="0.5"
+              data-value-increment="0.1"
+              data-target-angle="0"
+            >
+              <div class="blade-axis__gauge">
+                <div class="grade-indicator__body grade-indicator__body--horizontal">
+                  <div class="grade-indicator__scale-block">
+                    <div class="grade-indicator__strip-wrap blade-axis__arch-wrap" data-ai-strip>
+                      <svg class="blade-axis__arch-svg" viewBox="0 0 220 42" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+                        <defs>
+                          <linearGradient id="rollArchGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                            <stop offset="0%" stop-color="#991b1b" />
+                            <stop offset="10%" stop-color="#dc2626" />
+                            <stop offset="24%" stop-color="#2563eb" />
+                            <stop offset="34%" stop-color="#1d4ed8" />
+                            <stop offset="41%" stop-color="#0ea5e9" />
+                            <stop offset="46%" stop-color="#38bdf8" />
+                            <stop offset="49%" stop-color="#00d978" />
+                            <stop offset="50%" stop-color="#00ee9c" />
+                            <stop offset="51%" stop-color="#00d978" />
+                            <stop offset="54%" stop-color="#38bdf8" />
+                            <stop offset="59%" stop-color="#0ea5e9" />
+                            <stop offset="66%" stop-color="#1d4ed8" />
+                            <stop offset="76%" stop-color="#2563eb" />
+                            <stop offset="90%" stop-color="#dc2626" />
+                            <stop offset="100%" stop-color="#991b1b" />
+                          </linearGradient>
+                        </defs>
+                        <path
+                          class="blade-axis__arch-path"
+                          d="M 12 34 Q 110 5 208 34"
+                          fill="none"
+                          stroke="url(#rollArchGrad)"
+                          stroke-width="11"
+                          stroke-linecap="round"
+                        />
+                        <path class="blade-axis__arch-tol" data-ai-tol d="" fill="none" stroke="rgba(255,255,255,0.32)" stroke-width="13" stroke-linecap="round" />
+                        <g data-ai-ticks></g>
+                        <g data-ai-marker></g>
+                      </svg>
+                    </div>
+                    <div class="grade-indicator__labels grade-indicator__labels--horizontal">
+                      <span class="grade-indicator__label--neg" data-ai-bot>15.0° L</span>
+                      <span class="grade-indicator__label--zero" data-ai-mid>0.0°</span>
+                      <span class="grade-indicator__label--pos" data-ai-top>15.0° R</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="blade-axis__sidebar blade-sidebar-section">
+              <div class="blade-axis__title-row">
+                <span class="blade-axis__name">Roll</span>
+                <span class="grade-indicator__value" data-ai-readout="" data-axis="bladeAxisRoll">2.3° R</span>
+              </div>
+              <div class="blade-controls-group" data-blade-controls="roll">
+                <div class="grade-indicator__control">
+                  <span class="grade-indicator__control-label">Scale</span>
+                  <select class="grade-indicator__select" data-ai-increment aria-label="Roll scale increment"></select>
+                </div>
+                <div class="grade-indicator__control">
+                  <span class="grade-indicator__control-label">Value</span>
+                  <div class="grade-indicator__value-row">
+                    <input type="text" class="grade-indicator__input" data-ai-value-step inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Roll readout step in degrees" placeholder="step" />
+                    <button type="button" class="grade-indicator__apply" data-ai-value-apply>Apply</button>
+                  </div>
+                </div>
+                <div class="grade-indicator__control">
+                  <span class="grade-indicator__control-label">Target</span>
+                  <div class="grade-indicator__value-row">
+                    <input type="text" class="grade-indicator__input" data-ai-target inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Roll target at center in degrees" placeholder="0" />
+                    <button type="button" class="grade-indicator__apply" data-ai-target-apply>Apply</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div
+              id="gradeIndicator"
+              class="grade-indicator grade-indicator--embedded blade-instrument__gauge-block"
+              data-range="1"
+              data-tolerance="0.05"
+              data-current="0.12"
+              data-display-unit="ft"
+              data-increment="0.01"
+              data-value-increment="0.01"
+              data-target-grade="0"
+              data-demo="true"
+            >
+              <div class="blade-axis__gauge">
+                <div class="grade-indicator__body">
+                  <div class="grade-indicator__labels">
+                    <span id="giTopLabel" class="grade-indicator__label--pos">+1.00</span>
+                    <span id="giMidLabel" class="grade-indicator__label--zero">0.00</span>
+                    <span id="giBotLabel" class="grade-indicator__label--neg">−1.00</span>
+                  </div>
+                  <div class="grade-indicator__strip-wrap" id="giStripWrap">
+                    <div class="grade-indicator__strip" aria-hidden="true">
+                      <div class="grade-indicator__ticks" id="giTicks"></div>
+                      <div class="grade-indicator__tolerance" id="giTolerance"></div>
+                      <div class="grade-indicator__marker grade-indicator__marker--line" id="giMarker"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div id="gradeIndicatorControls" class="blade-axis__sidebar blade-sidebar-section">
+              <div class="grade-indicator__header">
+                <span class="grade-indicator__title">Height</span>
+                <span class="grade-indicator__value" id="giValue">+0.12 ft</span>
+              </div>
+              <div class="grade-indicator__controls">
+                <div class="grade-indicator__control">
+                  <span class="grade-indicator__control-label">Unit</span>
+                  <select class="grade-indicator__select" data-gi-unit aria-label="Elevation unit">
+                    <option value="ft" selected>ft</option>
+                    <option value="in">in</option>
+                    <option value="yd">yd</option>
+                    <option value="cm">cm</option>
+                    <option value="m">m</option>
+                  </select>
+                </div>
+                <div class="grade-indicator__control">
+                  <span class="grade-indicator__control-label">Scale</span>
+                  <select class="grade-indicator__select" data-gi-increment aria-label="Scale label increment"></select>
+                </div>
+                <div class="grade-indicator__control">
+                  <span class="grade-indicator__control-label">Value</span>
+                  <div class="grade-indicator__value-row">
+                    <input
+                      type="text"
+                      class="grade-indicator__input"
+                      data-gi-value-increment
+                      inputmode="decimal"
+                      autocomplete="off"
+                      spellcheck="false"
+                      aria-label="Readout rounding step in the selected unit"
+                      placeholder="step"
+                    />
+                    <button type="button" class="grade-indicator__apply" data-gi-value-apply aria-label="Apply value step">
+                      Apply
+                    </button>
+                  </div>
+                </div>
+                <div class="grade-indicator__control">
+                  <span class="grade-indicator__control-label">Grade</span>
+                  <div class="grade-indicator__value-row">
+                    <input
+                      type="text"
+                      class="grade-indicator__input"
+                      data-gi-target-grade
+                      inputmode="decimal"
+                      autocomplete="off"
+                      spellcheck="false"
+                      aria-label="Target elevation at center line in the selected unit"
+                      placeholder="0"
+                    />
+                    <button type="button" class="grade-indicator__apply" data-gi-grade-apply aria-label="Apply target grade">
+                      Apply
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <details class="blade-layout-tuner" id="bladeLayoutTuner">
+    <summary>Layout (grid)</summary>
+    <p class="blade-layout-tuner__hint">
+      First column track = bars (left); second = values and menus (right). Edit live; DevTools →
+      <code>.blade-instrument__layout</code> for grid overlay. Variables:
+      <code>--blade-row-cols</code>, <code>--blade-row-col-gap</code>, <code>--blade-layout-row-gap</code>.
+    </p>
+    <label>
+      grid-template-columns
+      <input
+        type="text"
+        spellcheck="false"
+        autocomplete="off"
+        data-blade-css-var="--blade-row-cols"
+        value="minmax(220px, 1fr) minmax(168px, 220px)"
+        aria-label="Grid template columns for each row"
+      />
+    </label>
+    <label>
+      column-gap
+      <input type="text" spellcheck="false" autocomplete="off" data-blade-css-var="--blade-row-col-gap" value="28px" aria-label="Horizontal gap between gauge and controls" />
+    </label>
+    <label>
+      row-gap (between yaw / roll / implement)
+      <input type="text" spellcheck="false" autocomplete="off" data-blade-css-var="--blade-layout-row-gap" value="20px" aria-label="Vertical gap between instrument rows" />
+    </label>
+  </details>
+
+  <script>
+    (function () {
+      var root = document.documentElement;
+      function syncFromComputed() {
+        document.querySelectorAll("[data-blade-css-var]").forEach(function (inp) {
+          var key = inp.getAttribute("data-blade-css-var");
+          var cur = getComputedStyle(root).getPropertyValue(key).trim();
+          if (cur) inp.value = cur;
+        });
+      }
+      function apply(inp) {
+        var key = inp.getAttribute("data-blade-css-var");
+        if (!key) return;
+        root.style.setProperty(key, inp.value.trim());
+      }
+      document.querySelectorAll("[data-blade-css-var]").forEach(function (inp) {
+        inp.addEventListener("input", function () {
+          apply(inp);
+        });
+        inp.addEventListener("change", function () {
+          apply(inp);
+        });
+      });
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", syncFromComputed);
+      } else {
+        syncFromComputed();
+      }
+    })();
+  </script>
+
+  <script>
+    /* Blade attitude: yaw / roll axes */
+    (function () {
+      const MIN_RANGE = 1e-6;
+
+      const INCREMENTS_DEG = [
+        { label: "0.1°", deg: 0.1 },
+        { label: "0.25°", deg: 0.25 },
+        { label: "0.5°", deg: 0.5 },
+        { label: "1°", deg: 1 },
+        { label: "2°", deg: 2 },
+        { label: "5°", deg: 5 },
+        { label: "10°", deg: 10 },
+      ];
+
+      function parseNum(el, name, fallback) {
+        const v = parseFloat(el.getAttribute("data-" + name));
+        return Number.isFinite(v) ? v : fallback;
+      }
+
+      function clamp(n, min, max) {
+        return Math.min(max, Math.max(min, n));
+      }
+
+      /** Same stops as --gi-scale-gradient-h (left = −max, right = +max) */
+      const BLADE_AXIS_STRIP_STOPS = [
+        { pos: 0, hex: "#991b1b" },
+        { pos: 0.1, hex: "#dc2626" },
+        { pos: 0.24, hex: "#2563eb" },
+        { pos: 0.34, hex: "#1d4ed8" },
+        { pos: 0.41, hex: "#0ea5e9" },
+        { pos: 0.46, hex: "#38bdf8" },
+        { pos: 0.49, hex: "#00d978" },
+        { pos: 0.5, hex: "#00ee9c" },
+        { pos: 0.51, hex: "#00d978" },
+        { pos: 0.54, hex: "#38bdf8" },
+        { pos: 0.59, hex: "#0ea5e9" },
+        { pos: 0.66, hex: "#1d4ed8" },
+        { pos: 0.76, hex: "#2563eb" },
+        { pos: 0.9, hex: "#dc2626" },
+        { pos: 1, hex: "#991b1b" },
+      ];
+
+      function hexToRgb(hex) {
+        const n = parseInt(hex.slice(1), 16);
+        return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+      }
+
+      function rgbToHex(r, g, b) {
+        return (
+          "#" +
+          [r, g, b]
+            .map(function (x) {
+              const v = Math.round(Math.max(0, Math.min(255, x)));
+              const h = v.toString(16);
+              return h.length === 1 ? "0" + h : h;
+            })
+            .join("")
+        );
+      }
+
+      /** norm: −1 … +1 → color on horizontal strip (offset / range) */
+      function bladeAxisReadoutColorFromNorm(norm) {
+        const p = (clamp(norm, -1, 1) + 1) / 2;
+        const stops = BLADE_AXIS_STRIP_STOPS;
+        let i = 0;
+        while (i < stops.length - 1 && stops[i + 1].pos < p) i += 1;
+        const a = stops[i];
+        const b = stops[i + 1] || a;
+        const span = b.pos - a.pos;
+        const t = span === 0 ? 0 : (p - a.pos) / span;
+        const ca = hexToRgb(a.hex);
+        const cb = hexToRgb(b.hex);
+        return rgbToHex(
+          ca.r + (cb.r - ca.r) * t,
+          ca.g + (cb.g - ca.g) * t,
+          ca.b + (cb.b - ca.b) * t
+        );
+      }
+
+      function normalizeRange(value, fallback) {
+        const n = typeof value === "number" ? value : parseFloat(value);
+        if (!Number.isFinite(n) || n <= 0) return fallback;
+        return Math.max(MIN_RANGE, n);
+      }
+
+      function smartFixedAngle(absVal, step) {
+        const s = Math.max(step, 1e-12);
+        if (s >= 1) return absVal.toFixed(0);
+        if (s >= 0.1) return absVal.toFixed(1);
+        if (s >= 0.01) return absVal.toFixed(2);
+        return absVal.toFixed(3);
+      }
+
+      function formatAngleOffset(deg, stepDeg) {
+        const stepU = Math.max(stepDeg, 1e-12);
+        const rd = Math.round(deg / stepU) * stepU;
+        const body = smartFixedAngle(Math.abs(rd), stepU);
+        if (rd === 0) return body + "°";
+        if (rd < 0) return body + "° L";
+        return body + "° R";
+      }
+
+      function formatAbsoluteAngleLabel(deg, stepDeg) {
+        const stepU = Math.max(stepDeg, 1e-12);
+        const rd = Math.round(deg / stepU) * stepU;
+        const body = smartFixedAngle(Math.abs(rd), stepU);
+        if (rd === 0) return body + "°";
+        if (rd < 0) return body + "° L";
+        return body + "° R";
+      }
+
+      function readDataset(root) {
+        const inc = Math.max(parseNum(root, "increment", 0.5), 1e-9);
+        let valInc = parseNum(root, "value-increment", NaN);
+        if (!Number.isFinite(valInc)) valInc = inc;
+        valInc = Math.max(valInc, 1e-9);
+        return {
+          rangeDeg: normalizeRange(parseNum(root, "range", 15), 15),
+          toleranceDeg: Math.max(0, parseNum(root, "tolerance", 0.5)),
+          currentDeg: parseNum(root, "current", 0),
+          incrementDeg: inc,
+          valueIncrementDeg: valInc,
+          targetDeg: parseNum(root, "target-angle", 0),
+        };
+      }
+
+      function numToInputString(deg) {
+        if (!Number.isFinite(deg)) return "";
+        const abs = Math.abs(deg);
+        const dec = abs >= 100 ? 1 : abs >= 10 ? 2 : abs >= 1 ? 3 : 4;
+        return String(Number(deg.toFixed(dec)));
+      }
+
+      function parseNumInput(raw) {
+        const v = parseFloat(String(raw).replace(/,/g, "").trim());
+        return Number.isFinite(v) ? v : null;
+      }
+
+      function populateIncrementSelect(root, incSel, preferredDeg) {
+        incSel.innerHTML = "";
+        let bestIdx = 0;
+        let bestDiff = Infinity;
+        INCREMENTS_DEG.forEach(function (row, i) {
+          const opt = document.createElement("option");
+          opt.value = String(row.deg);
+          opt.textContent = row.label;
+          incSel.appendChild(opt);
+          const d = Math.abs(row.deg - preferredDeg);
+          if (d < bestDiff) {
+            bestDiff = d;
+            bestIdx = i;
+          }
+        });
+        incSel.selectedIndex = bestIdx;
+        root.setAttribute("data-increment", String(INCREMENTS_DEG[bestIdx].deg));
+      }
+
+      function syncIncrementFromDataset(root, incSel) {
+        const want = parseNum(root, "increment", 0.5);
+        let best = 0;
+        let bestDiff = Infinity;
+        for (let i = 0; i < incSel.options.length; i++) {
+          const d = Math.abs(parseFloat(incSel.options[i].value) - want);
+          if (d < bestDiff) {
+            bestDiff = d;
+            best = i;
+          }
+        }
+        incSel.selectedIndex = best;
+        root.setAttribute("data-increment", incSel.options[best].value);
+      }
+
+      function valueStepToInputString(stepDeg) {
+        if (!Number.isFinite(stepDeg) || stepDeg <= 0) return "";
+        const abs = Math.abs(stepDeg);
+        const dec = abs >= 1 ? 4 : abs >= 0.1 ? 5 : 6;
+        return String(Number(stepDeg.toFixed(dec)));
+      }
+
+      /** Quadratic Bezier for roll arch (matches SVG path M 12 34 Q 110 5 208 34) */
+      var ROLL_ARCH = {
+        p0: { x: 12, y: 34 },
+        p1: { x: 110, y: 5 },
+        p2: { x: 208, y: 34 },
+      };
+
+      function quadBezierPoint(p0, p1, p2, t) {
+        var u = 1 - t;
+        return {
+          x: u * u * p0.x + 2 * u * t * p1.x + t * t * p2.x,
+          y: u * u * p0.y + 2 * u * t * p1.y + t * t * p2.y,
+        };
+      }
+
+      function quadBezierTangent(p0, p1, p2, t) {
+        var u = 1 - t;
+        var dx = 2 * u * (p1.x - p0.x) + 2 * t * (p2.x - p1.x);
+        var dy = 2 * u * (p1.y - p0.y) + 2 * t * (p2.y - p1.y);
+        var len = Math.hypot(dx, dy) || 1;
+        return { dx: dx / len, dy: dy / len };
+      }
+
+      function quadBezierPathD(p0, p1, p2, t0, t1, steps) {
+        var d = "";
+        var first = true;
+        var i;
+        for (i = 0; i <= steps; i++) {
+          var t = t0 + (i / steps) * (t1 - t0);
+          var p = quadBezierPoint(p0, p1, p2, t);
+          d += (first ? "M " : " L ") + p.x.toFixed(2) + " " + p.y.toFixed(2);
+          first = false;
+        }
+        return d;
+      }
+
+      function readoutElForAxis(axisEl) {
+        var inside = axisEl.querySelector("[data-ai-readout]");
+        if (inside) return inside;
+        return document.querySelector('[data-ai-readout][data-axis="' + axisEl.id + '"]');
+      }
+
+      function updateRollArchIndicator(axisEl, ticksG, tolPath, markerG, norm, offsetDeg, atTarget, toleranceDeg, rangeDeg) {
+        var p0 = ROLL_ARCH.p0;
+        var p1 = ROLL_ARCH.p1;
+        var p2 = ROLL_ARCH.p2;
+        var t = (norm + 1) / 2;
+        var p = quadBezierPoint(p0, p1, p2, t);
+        var tan = quadBezierTangent(p0, p1, p2, t);
+        var nx = -tan.dy;
+        var ny = tan.dx;
+
+        var tolN = Math.min(1, toleranceDeg / rangeDeg);
+        var t0 = Math.max(0, 0.5 - 0.5 * tolN);
+        var t1 = Math.min(1, 0.5 + 0.5 * tolN);
+        if (toleranceDeg <= 0 || t1 - t0 < 1e-4) {
+          tolPath.setAttribute("d", "");
+        } else {
+          tolPath.setAttribute("d", quadBezierPathD(p0, p1, p2, t0, t1, 24));
+        }
+
+        ticksG.innerHTML = "";
+        var major = 5;
+        var j;
+        for (j = 0; j <= major; j++) {
+          var tt = j / major;
+          var pt = quadBezierPoint(p0, p1, p2, tt);
+          var T = quadBezierTangent(p0, p1, p2, tt);
+          var px = -T.dy;
+          var py = T.dx;
+          var line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+          line.setAttribute("x1", (pt.x - px * 4).toFixed(2));
+          line.setAttribute("y1", (pt.y - py * 4).toFixed(2));
+          line.setAttribute("x2", (pt.x + px * 4).toFixed(2));
+          line.setAttribute("y2", (pt.y + py * 4).toFixed(2));
+          line.setAttribute("stroke", j % 2 === 0 ? "rgba(0,0,0,0.32)" : "rgba(0,0,0,0.2)");
+          line.setAttribute("stroke-width", "1");
+          ticksG.appendChild(line);
+        }
+
+        markerG.innerHTML = "";
+        var pCenter = quadBezierPoint(p0, p1, p2, 0.5);
+        if (atTarget) {
+          var lineM = document.createElementNS("http://www.w3.org/2000/svg", "line");
+          lineM.setAttribute("class", "blade-axis__arch-marker-line");
+          lineM.setAttribute("x1", (p.x - nx * 7).toFixed(2));
+          lineM.setAttribute("y1", (p.y - ny * 7).toFixed(2));
+          lineM.setAttribute("x2", (p.x + nx * 7).toFixed(2));
+          lineM.setAttribute("y2", (p.y + ny * 7).toFixed(2));
+          markerG.appendChild(lineM);
+        } else {
+          var vx = pCenter.x - p.x;
+          var vy = pCenter.y - p.y;
+          var vlen = Math.hypot(vx, vy) || 1;
+          var ux = vx / vlen;
+          var uy = vy / vlen;
+          var perpX = -uy;
+          var perpY = ux;
+          var tipX = p.x + ux * 10;
+          var tipY = p.y + uy * 10;
+          var bx = p.x - ux * 3;
+          var by = p.y - uy * 3;
+          var poly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+          poly.setAttribute("class", "blade-axis__arch-marker-arrow");
+          poly.setAttribute(
+            "points",
+            [
+              tipX.toFixed(2),
+              tipY.toFixed(2),
+              (bx + perpX * 5).toFixed(2),
+              (by + perpY * 5).toFixed(2),
+              (bx - perpX * 5).toFixed(2),
+              (by - perpY * 5).toFixed(2),
+            ].join(" ")
+          );
+          markerG.appendChild(poly);
+        }
+      }
+
+      function updateAngleIndicator(axisEl, opts) {
+        const rangeDeg = normalizeRange(opts.rangeDeg, 15);
+        const toleranceDeg = Math.max(0, opts.toleranceDeg);
+        const targetDeg = Number.isFinite(opts.targetDeg) ? opts.targetDeg : 0;
+        const valueInc = Math.max(opts.valueIncrementDeg, 1e-9);
+
+        const offsetDeg = opts.currentDeg - targetDeg;
+
+        const valueEl = readoutElForAxis(axisEl);
+        const topLabel = axisEl.querySelector("[data-ai-top]");
+        const midLabel = axisEl.querySelector("[data-ai-mid]");
+        const botLabel = axisEl.querySelector("[data-ai-bot]");
+        const stripWrap = axisEl.querySelector("[data-ai-strip]");
+        const archSvg = axisEl.querySelector(".blade-axis__arch-svg");
+        if (!valueEl || !topLabel || !midLabel || !botLabel || !stripWrap) {
+          return;
+        }
+
+        topLabel.textContent = formatAbsoluteAngleLabel(targetDeg + rangeDeg, valueInc);
+        midLabel.textContent = formatAbsoluteAngleLabel(targetDeg, valueInc);
+        botLabel.textContent = formatAbsoluteAngleLabel(targetDeg - rangeDeg, valueInc);
+
+        const norm = clamp(offsetDeg / rangeDeg, -1, 1);
+        const absOff = Math.abs(offsetDeg);
+        const atTarget = absOff <= toleranceDeg;
+        const inset = 6;
+
+        if (archSvg) {
+          const ticksG = archSvg.querySelector("[data-ai-ticks]");
+          const tolPath = archSvg.querySelector("[data-ai-tol]");
+          const markerG = archSvg.querySelector("[data-ai-marker]");
+          if (!ticksG || !tolPath || !markerG) {
+            return;
+          }
+          updateRollArchIndicator(axisEl, ticksG, tolPath, markerG, norm, offsetDeg, atTarget, toleranceDeg, rangeDeg);
+        } else {
+        const ticksEl = axisEl.querySelector("[data-ai-ticks]");
+        const tolEl = axisEl.querySelector("[data-ai-tol]");
+        const marker = axisEl.querySelector("[data-ai-marker]");
+        if (!ticksEl || !tolEl || !marker) {
+          return;
+        }
+
+        const horizontal = axisEl.classList.contains("grade-indicator--horizontal");
+
+        marker.classList.remove(
+          "grade-indicator__marker--line",
+          "grade-indicator__marker--line-h",
+          "grade-indicator__marker--arrow-down",
+          "grade-indicator__marker--arrow-up",
+          "grade-indicator__marker--arrow-left",
+          "grade-indicator__marker--arrow-right"
+        );
+        marker.style.left = "";
+        marker.style.top = "";
+        marker.style.transform = "";
+
+        if (horizontal) {
+          const w = stripWrap.clientWidth || 220;
+          const centerX = w / 2;
+          const spanPx = w / 2 - inset;
+          const markerX = centerX + norm * spanPx;
+
+          if (atTarget) {
+            marker.classList.add("grade-indicator__marker--line", "grade-indicator__marker--line-h");
+            marker.style.left = centerX + "px";
+            marker.style.transform = "translateX(-50%)";
+          } else if (offsetDeg > 0) {
+            marker.classList.add("grade-indicator__marker--arrow-left");
+            marker.style.left = markerX + "px";
+            marker.style.top = "50%";
+            marker.style.transform = "translate(-100%, -50%)";
+          } else {
+            marker.classList.add("grade-indicator__marker--arrow-right");
+            marker.style.left = markerX + "px";
+            marker.style.top = "50%";
+            marker.style.transform = "translate(0, -50%)";
+          }
+
+          const tolHalfPx = (toleranceDeg / rangeDeg) * spanPx;
+          tolEl.style.left = centerX - tolHalfPx + "px";
+          tolEl.style.width = tolHalfPx * 2 + "px";
+          tolEl.style.top = "0";
+          tolEl.style.bottom = "0";
+          tolEl.style.height = "";
+          tolEl.style.right = "auto";
+          tolEl.style.transform = "none";
+
+          ticksEl.innerHTML = "";
+          const major = 5;
+          for (let i = 0; i <= major; i++) {
+            const t = i / major;
+            const x = t * w;
+            const tick = document.createElement("div");
+            tick.className = "grade-indicator__tick" + (i % 2 === 0 ? " grade-indicator__tick--major" : "");
+            tick.style.left = x + "px";
+            tick.style.top = "0";
+            tick.style.bottom = "0";
+            ticksEl.appendChild(tick);
+          }
+        } else {
+          const h = stripWrap.clientHeight || 220;
+          const centerY = h / 2;
+          const spanPx = h / 2 - inset;
+          const markerY = centerY - norm * spanPx;
+
+          if (atTarget) {
+            marker.classList.add("grade-indicator__marker--line");
+            marker.style.top = centerY + "px";
+            marker.style.transform = "translateY(-50%)";
+          } else if (offsetDeg > 0) {
+            marker.classList.add("grade-indicator__marker--arrow-down");
+            marker.style.top = markerY + "px";
+            marker.style.transform = "translate(-50%, -100%)";
+          } else {
+            marker.classList.add("grade-indicator__marker--arrow-up");
+            marker.style.top = markerY + "px";
+            marker.style.transform = "translate(-50%, 0)";
+          }
+
+          const tolHalfPx = (toleranceDeg / rangeDeg) * spanPx;
+          tolEl.style.top = centerY - tolHalfPx + "px";
+          tolEl.style.height = tolHalfPx * 2 + "px";
+          tolEl.style.left = "0";
+          tolEl.style.right = "0";
+          tolEl.style.width = "";
+          tolEl.style.bottom = "";
+          tolEl.style.transform = "";
+
+          ticksEl.innerHTML = "";
+          const major = 5;
+          for (let i = 0; i <= major; i++) {
+            const t = i / major;
+            const y = t * h;
+            const tick = document.createElement("div");
+            tick.className = "grade-indicator__tick" + (i % 2 === 0 ? " grade-indicator__tick--major" : "");
+            tick.style.top = y + "px";
+            ticksEl.appendChild(tick);
+          }
+        }
+        }
+
+        valueEl.textContent = formatAngleOffset(offsetDeg, valueInc);
+
+        valueEl.style.color = bladeAxisReadoutColorFromNorm(norm);
+        valueEl.classList.remove(
+          "grade-indicator__value--ok",
+          "grade-indicator__value--warn",
+          "grade-indicator__value--bad",
+          "grade-indicator__value--above"
+        );
+
+        axisEl.classList.remove("grade-indicator--on-target");
+        if (toleranceDeg > 0 && absOff <= toleranceDeg) {
+          axisEl.classList.add("grade-indicator--on-target");
+        }
+      }
+
+      function findControlGroup(axisEl) {
+        const main = axisEl.closest(".grade-indicator__main");
+        if (!main) return null;
+        const key = axisEl.id === "bladeAxisRoll" ? "roll" : "yaw";
+        return main.querySelector('[data-blade-controls="' + key + '"]');
+      }
+
+      function syncValueStepInput(axisEl, controlGroup) {
+        if (!controlGroup) return;
+        const inp = controlGroup.querySelector("[data-ai-value-step]");
+        if (!inp || inp.tagName !== "INPUT") return;
+        if (document.activeElement === inp) return;
+        const ds = readDataset(axisEl);
+        inp.value = valueStepToInputString(ds.valueIncrementDeg);
+      }
+
+      function applyValueStepInput(axisEl, controlGroup) {
+        if (!controlGroup) return;
+        const inp = controlGroup.querySelector("[data-ai-value-step]");
+        if (!inp || inp.tagName !== "INPUT") return;
+        const v = parseNumInput(inp.value);
+        if (v === null || v <= 0) {
+          syncValueStepInput(axisEl, controlGroup);
+          updateAngleIndicator(axisEl, readDataset(axisEl));
+          return;
+        }
+        axisEl.setAttribute("data-value-increment", String(v));
+        updateAngleIndicator(axisEl, readDataset(axisEl));
+      }
+
+      function syncTargetInput(axisEl, controlGroup) {
+        if (!controlGroup) return;
+        const inp = controlGroup.querySelector("[data-ai-target]");
+        if (!inp || inp.tagName !== "INPUT") return;
+        if (document.activeElement === inp) return;
+        const ds = readDataset(axisEl);
+        inp.value = numToInputString(ds.targetDeg);
+      }
+
+      function applyTargetInput(axisEl, controlGroup) {
+        if (!controlGroup) return;
+        const inp = controlGroup.querySelector("[data-ai-target]");
+        if (!inp || inp.tagName !== "INPUT") return;
+        const v = parseNumInput(inp.value);
+        if (v === null) {
+          syncTargetInput(axisEl, controlGroup);
+          updateAngleIndicator(axisEl, readDataset(axisEl));
+          return;
+        }
+        axisEl.setAttribute("data-target-angle", String(v));
+        updateAngleIndicator(axisEl, readDataset(axisEl));
+      }
+
+      function configureAngleIndicator(el, opts) {
+        if (!opts) return;
+        let repopulate = false;
+        if (opts.range !== undefined) el.setAttribute("data-range", String(opts.range));
+        if (opts.tolerance !== undefined) el.setAttribute("data-tolerance", String(opts.tolerance));
+        if (opts.current !== undefined) el.setAttribute("data-current", String(opts.current));
+        if (opts.increment !== undefined) {
+          el.setAttribute("data-increment", String(opts.increment));
+          repopulate = true;
+        }
+        if (opts.valueIncrement !== undefined) {
+          el.setAttribute("data-value-increment", String(opts.valueIncrement));
+        }
+        if (opts.targetAngle !== undefined) {
+          el.setAttribute("data-target-angle", String(opts.targetAngle));
+        }
+        const cg = findControlGroup(el);
+        const incSel = cg ? cg.querySelector("[data-ai-increment]") : null;
+        if (incSel && cg) {
+          if (repopulate) populateIncrementSelect(el, incSel, parseNum(el, "increment", 0.5));
+          syncIncrementFromDataset(el, incSel);
+        }
+        syncValueStepInput(el, cg);
+        syncTargetInput(el, cg);
+        updateAngleIndicator(el, readDataset(el));
+      }
+
+      function bindControls(axisEl, controlGroup) {
+        const incSel = controlGroup.querySelector("[data-ai-increment]");
+        const valInp = controlGroup.querySelector("[data-ai-value-step]");
+        const tgtInp = controlGroup.querySelector("[data-ai-target]");
+        if (!incSel || !valInp || valInp.tagName !== "INPUT") return;
+        if (!tgtInp || tgtInp.tagName !== "INPUT") return;
+
+        incSel.addEventListener("change", function () {
+          const v = parseFloat(incSel.value);
+          if (Number.isFinite(v)) axisEl.setAttribute("data-increment", String(v));
+          updateAngleIndicator(axisEl, readDataset(axisEl));
+        });
+
+        function commitVal() {
+          applyValueStepInput(axisEl, controlGroup);
+        }
+        valInp.addEventListener("change", commitVal);
+        valInp.addEventListener("blur", commitVal);
+        valInp.addEventListener("keydown", function (e) {
+          if (e.key !== "Enter" && e.code !== "Enter" && e.code !== "NumpadEnter") return;
+          e.preventDefault();
+          commitVal();
+        });
+        const valBtn = controlGroup.querySelector("[data-ai-value-apply]");
+        if (valBtn) valBtn.addEventListener("click", commitVal);
+
+        function commitTgt() {
+          applyTargetInput(axisEl, controlGroup);
+        }
+        tgtInp.addEventListener("change", commitTgt);
+        tgtInp.addEventListener("blur", commitTgt);
+        tgtInp.addEventListener("keydown", function (e) {
+          if (e.key !== "Enter" && e.code !== "Enter" && e.code !== "NumpadEnter") return;
+          e.preventDefault();
+          commitTgt();
+        });
+        const tgtBtn = controlGroup.querySelector("[data-ai-target-apply]");
+        if (tgtBtn) tgtBtn.addEventListener("click", commitTgt);
+      }
+
+      function initAxis(axisEl, controlGroup) {
+        const incSel = controlGroup.querySelector("[data-ai-increment]");
+        const valInp = controlGroup.querySelector("[data-ai-value-step]");
+        const tgtInp = controlGroup.querySelector("[data-ai-target]");
+        if (!incSel || !valInp || !tgtInp) return;
+        populateIncrementSelect(axisEl, incSel, parseNum(axisEl, "increment", 0.5));
+        syncIncrementFromDataset(axisEl, incSel);
+        syncValueStepInput(axisEl, controlGroup);
+        syncTargetInput(axisEl, controlGroup);
+        bindControls(axisEl, controlGroup);
+        updateAngleIndicator(axisEl, readDataset(axisEl));
+      }
+
+      function initCombinedWidget(outer) {
+        const roll = document.getElementById("bladeAxisRoll");
+        const yaw = document.getElementById("bladeAxisYaw");
+        const rollCg = outer.querySelector('[data-blade-controls="roll"]');
+        const yawCg = outer.querySelector('[data-blade-controls="yaw"]');
+        if (roll && rollCg) initAxis(roll, rollCg);
+        if (yaw && yawCg) initAxis(yaw, yawCg);
+
+        function refreshAll() {
+          if (roll) updateAngleIndicator(roll, readDataset(roll));
+          if (yaw) updateAngleIndicator(yaw, readDataset(yaw));
+        }
+        window.addEventListener("resize", refreshAll);
+
+        if (outer.getAttribute("data-demo") === "true") {
+          var t0 = performance.now();
+          function tick(now) {
+            var phase = (now - t0) / 3200;
+            if (roll) {
+              roll.setAttribute("data-current", (rangeAmplitude(roll) * Math.sin(phase * Math.PI * 2)).toFixed(5));
+            }
+            if (yaw) {
+              yaw.setAttribute(
+                "data-current",
+                (-rangeAmplitude(yaw) * Math.sin(phase * Math.PI * 2 + 0.7)).toFixed(5)
+              );
+            }
+            refreshAll();
+            requestAnimationFrame(tick);
+          }
+          requestAnimationFrame(tick);
+        }
+      }
+
+      function rangeAmplitude(axisEl) {
+        var r = parseNum(axisEl, "range", 15);
+        return Math.min(8, Math.max(1.5, r * 0.12));
+      }
+
+      var combined = document.getElementById("bladeAttitudeIndicator");
+      if (combined) initCombinedWidget(combined);
+
+      window.configureBladeAngleIndicator = configureAngleIndicator;
+      window.setBladeAngleCurrent = function (el, deg) {
+        configureAngleIndicator(el, { current: deg });
+      };
+      window.setBladeAngleTarget = function (el, deg) {
+        configureAngleIndicator(el, { targetAngle: deg });
+      };
+    })();
+  </script>
+  <script>
+    /* Implement position (elevation vs target grade) */
+    (function () {
+      /**
+       * data-range, data-tolerance, data-current are in feet (internal).
+       * data-display-unit controls labels + readout; data-value-increment (feet) rounds readout and ± scale labels.
+       * data-target-grade (feet): absolute elevation at the scale center; current is offset from this target.
+       * data-demo="true": animate sample current values (omit or set false when driving data-current from your app).
+       * #gradeIndicator = gauge (dataset); #gradeIndicatorControls = menus + #giValue (when split layout).
+       */
+      const MIN_RANGE = 1e-6;
+      const FT_PER_M = 3.280839895013123;
+
+      function gradeControlsScope() {
+        return document.getElementById("gradeIndicatorControls") || document.getElementById("gradeIndicator");
+      }
+
+      const UNIT_LABEL = { ft: "ft", in: "in", yd: "yd", cm: "cm", m: "m" };
+
+      /** Preset increments: label + step in feet */
+      const INCREMENTS_BY_UNIT = {
+        ft: [
+          { label: "0.001 ft", ft: 0.001 },
+          { label: "0.01 ft", ft: 0.01 },
+          { label: "0.05 ft", ft: 0.05 },
+          { label: "0.1 ft", ft: 0.1 },
+          { label: "0.25 ft", ft: 0.25 },
+          { label: "0.5 ft", ft: 0.5 },
+          { label: "1 ft", ft: 1 },
+        ],
+        in: [
+          { label: "1/16 in", ft: 1 / 16 / 12 },
+          { label: "1/8 in", ft: (1 / 8) / 12 },
+          { label: "1/4 in", ft: 0.25 / 12 },
+          { label: "1/2 in", ft: 0.5 / 12 },
+          { label: "1 in", ft: 1 / 12 },
+          { label: "3 in", ft: 3 / 12 },
+          { label: "6 in", ft: 6 / 12 },
+          { label: "1 ft", ft: 1 },
+        ],
+        yd: [
+          { label: "0.001 yd", ft: 0.001 * 3 },
+          { label: "0.01 yd", ft: 0.01 * 3 },
+          { label: "0.1 yd", ft: 0.1 * 3 },
+          { label: "0.25 yd", ft: 0.25 * 3 },
+          { label: "0.5 yd", ft: 0.5 * 3 },
+          { label: "1 yd", ft: 3 },
+        ],
+        cm: [
+          { label: "1 mm", ft: 1 / 304.8 },
+          { label: "2 mm", ft: 2 / 304.8 },
+          { label: "5 mm", ft: 5 / 304.8 },
+          { label: "1 cm", ft: 1 / 30.48 },
+          { label: "2 cm", ft: 2 / 30.48 },
+          { label: "5 cm", ft: 5 / 30.48 },
+          { label: "10 cm", ft: 10 / 30.48 },
+        ],
+        m: [
+          { label: "1 mm", ft: 0.001 * FT_PER_M },
+          { label: "5 mm", ft: 0.005 * FT_PER_M },
+          { label: "1 cm", ft: 0.01 * FT_PER_M },
+          { label: "5 cm", ft: 0.05 * FT_PER_M },
+          { label: "0.1 m", ft: 0.1 * FT_PER_M },
+          { label: "0.5 m", ft: 0.5 * FT_PER_M },
+          { label: "1 m", ft: FT_PER_M },
+        ],
+      };
+
+      function parseNum(el, name, fallback) {
+        const v = parseFloat(el.getAttribute("data-" + name));
+        return Number.isFinite(v) ? v : fallback;
+      }
+
+      function feetToUnit(ft, unit) {
+        switch (unit) {
+          case "in":
+            return ft * 12;
+          case "yd":
+            return ft / 3;
+          case "cm":
+            return ft * 30.48;
+          case "m":
+            return ft / FT_PER_M;
+          case "ft":
+          default:
+            return ft;
+        }
+      }
+
+      function unitToFeet(value, unit) {
+        switch (unit) {
+          case "in":
+            return value / 12;
+          case "yd":
+            return value * 3;
+          case "cm":
+            return value / 30.48;
+          case "m":
+            return value * FT_PER_M;
+          case "ft":
+          default:
+            return value;
+        }
+      }
+
+      function smartFixed(absVal, stepInUnit) {
+        const s = Math.max(stepInUnit, 1e-12);
+        if (s >= 1) return absVal.toFixed(0);
+        if (s >= 0.1) return absVal.toFixed(1);
+        if (s >= 0.01) return absVal.toFixed(2);
+        if (s >= 0.001) return absVal.toFixed(3);
+        return absVal.toFixed(4);
+      }
+
+      function formatElevationOffset(ft, unit, incFt) {
+        const stepU = Math.max(feetToUnit(incFt, unit), 1e-12);
+        const disp = feetToUnit(ft, unit);
+        const rd = Math.round(disp / stepU) * stepU;
+        const sign = rd > 0 ? "+" : rd < 0 ? "−" : "";
+        const abs = Math.abs(rd);
+        const u = unit in UNIT_LABEL ? unit : "ft";
+        return sign + smartFixed(abs, stepU) + " " + UNIT_LABEL[u];
+      }
+
+      function formatScaleEnd(rangeFt, unit, incFt, positive) {
+        const stepU = Math.max(feetToUnit(incFt, unit), 1e-12);
+        const disp = feetToUnit(rangeFt, unit);
+        const rd = Math.round(disp / stepU) * stepU;
+        const abs = Math.abs(rd);
+        return (positive ? "+" : "−") + smartFixed(abs, stepU);
+      }
+
+      function formatZeroMid(unit, incFt) {
+        const stepU = Math.max(feetToUnit(incFt, unit), 1e-12);
+        return smartFixed(0, stepU);
+      }
+
+      /** Absolute elevation label (top / center / bottom of scale) in display units, rounded by value step */
+      function formatAbsoluteElevationLabel(ft, unit, incFt) {
+        const stepU = Math.max(feetToUnit(incFt, unit), 1e-12);
+        const disp = feetToUnit(ft, unit);
+        const rd = Math.round(disp / stepU) * stepU;
+        const body = smartFixed(Math.abs(rd), stepU);
+        if (rd < 0) return "−" + body;
+        return body;
+      }
+
+      function clamp(n, min, max) {
+        return Math.min(max, Math.max(min, n));
+      }
+
+      function normalizeRange(value, fallback) {
+        const n = typeof value === "number" ? value : parseFloat(value);
+        if (!Number.isFinite(n) || n <= 0) return fallback;
+        return Math.max(MIN_RANGE, n);
+      }
+
+      function normalizeUnit(u) {
+        return u === "in" || u === "ft" || u === "yd" || u === "cm" || u === "m" ? u : "ft";
+      }
+
+      /** Format value-increment (feet) as a string in the given display unit for the input field */
+      function valueIncrementToInputString(ft, unit) {
+        const v = feetToUnit(ft, unit);
+        if (!Number.isFinite(v) || v <= 0) return "";
+        const abs = Math.abs(v);
+        const dec = abs >= 100 ? 2 : abs >= 10 ? 3 : abs >= 1 ? 4 : abs >= 0.1 ? 5 : 6;
+        return String(Number(v.toFixed(dec)));
+      }
+
+      /** Parse typed step in display units → feet */
+      function parseValueIncrementInput(raw, unit) {
+        const v = parseFloat(String(raw).replace(/,/g, "").trim());
+        if (!Number.isFinite(v) || v <= 0) return null;
+        return unitToFeet(v, unit);
+      }
+
+      function syncValueIncrementInput(root) {
+        const inp = gradeControlsScope().querySelector("[data-gi-value-increment]");
+        if (!inp || inp.tagName !== "INPUT") return;
+        if (document.activeElement === inp) return;
+        const ds = readFromDataset(root);
+        inp.value = valueIncrementToInputString(ds.valueIncrementFt, ds.displayUnit);
+      }
+
+      function applyValueIncrementInput(root) {
+        const inp = gradeControlsScope().querySelector("[data-gi-value-increment]");
+        if (!inp || inp.tagName !== "INPUT") return;
+        const ds = readFromDataset(root);
+        const ft = parseValueIncrementInput(inp.value, ds.displayUnit);
+        if (ft === null) {
+          syncValueIncrementInput(root);
+          updateGradeIndicator(root, readFromDataset(root));
+          return;
+        }
+        root.setAttribute("data-value-increment", String(Math.max(ft, 1e-12)));
+        updateGradeIndicator(root, readFromDataset(root));
+      }
+
+      function gradeToInputString(ft, unit) {
+        const v = feetToUnit(ft, unit);
+        if (!Number.isFinite(v)) return "";
+        const abs = Math.abs(v);
+        const dec =
+          abs >= 10000 ? 1 : abs >= 1000 ? 2 : abs >= 100 ? 2 : abs >= 10 ? 3 : abs >= 1 ? 4 : 5;
+        return String(Number(v.toFixed(dec)));
+      }
+
+      function parseGradeInput(raw, unit) {
+        const v = parseFloat(String(raw).replace(/,/g, "").trim());
+        if (!Number.isFinite(v)) return null;
+        return unitToFeet(v, unit);
+      }
+
+      function syncGradeInput(root) {
+        const inp = gradeControlsScope().querySelector("[data-gi-target-grade]");
+        if (!inp || inp.tagName !== "INPUT") return;
+        if (document.activeElement === inp) return;
+        const ds = readFromDataset(root);
+        inp.value = gradeToInputString(ds.targetGradeFt, ds.displayUnit);
+      }
+
+      function applyGradeInput(root) {
+        const inp = gradeControlsScope().querySelector("[data-gi-target-grade]");
+        if (!inp || inp.tagName !== "INPUT") return;
+        const ds = readFromDataset(root);
+        const ft = parseGradeInput(inp.value, ds.displayUnit);
+        if (ft === null) {
+          syncGradeInput(root);
+          updateGradeIndicator(root, readFromDataset(root));
+          return;
+        }
+        root.setAttribute("data-target-grade", String(ft));
+        updateGradeIndicator(root, readFromDataset(root));
+      }
+
+      /**
+       * @param {string} [dataKey] — "increment" | "value-increment"
+       */
+      function populateIncrementSelect(root, unitSel, incSel, preferredFt, dataKey) {
+        const key = dataKey || "increment";
+        const u = normalizeUnit(unitSel.value);
+        const list = INCREMENTS_BY_UNIT[u] || INCREMENTS_BY_UNIT.ft;
+        incSel.innerHTML = "";
+        let bestIdx = 0;
+        let bestDiff = Infinity;
+        list.forEach(function (row, i) {
+          const opt = document.createElement("option");
+          opt.value = String(row.ft);
+          opt.textContent = row.label;
+          opt.setAttribute("data-ft", String(row.ft));
+          incSel.appendChild(opt);
+          const d = Math.abs(row.ft - preferredFt);
+          if (d < bestDiff) {
+            bestDiff = d;
+            bestIdx = i;
+          }
+        });
+        incSel.selectedIndex = bestIdx;
+        root.setAttribute("data-" + key, String(list[bestIdx].ft));
+      }
+
+      function syncIncrementFromDataset(root, incSel, dataKey) {
+        const key = dataKey || "increment";
+        const fallback = key === "value-increment" ? parseNum(root, "increment", 0.01) : 0.01;
+        const want = parseNum(root, key, fallback);
+        const opts = incSel.options;
+        let best = 0;
+        let bestDiff = Infinity;
+        for (let i = 0; i < opts.length; i++) {
+          const ft = parseFloat(opts[i].value);
+          const d = Math.abs(ft - want);
+          if (d < bestDiff) {
+            bestDiff = d;
+            best = i;
+          }
+        }
+        incSel.selectedIndex = best;
+        root.setAttribute("data-" + key, opts[best].value);
+      }
+
+      function updateGradeIndicator(root, opts) {
+        const rangeFt = normalizeRange(opts.rangeFt, 1);
+        const toleranceFt = Math.max(0, opts.toleranceFt);
+        const currentFt = opts.currentFt;
+        const unit = normalizeUnit(opts.displayUnit);
+        const valueInc = Math.max(opts.valueIncrementFt, 1e-9);
+        const targetGradeFt = Number.isFinite(opts.targetGradeFt) ? opts.targetGradeFt : 0;
+
+        const valueEl = document.getElementById("giValue");
+        const topLabel = root.querySelector("#giTopLabel");
+        const midLabel = root.querySelector("#giMidLabel");
+        const botLabel = root.querySelector("#giBotLabel");
+        const stripWrap = root.querySelector("#giStripWrap");
+        const ticksEl = root.querySelector("#giTicks");
+        const tolEl = root.querySelector("#giTolerance");
+        const marker = root.querySelector("#giMarker");
+
+        topLabel.textContent = formatAbsoluteElevationLabel(targetGradeFt + rangeFt, unit, valueInc);
+        midLabel.textContent = formatAbsoluteElevationLabel(targetGradeFt, unit, valueInc);
+        botLabel.textContent = formatAbsoluteElevationLabel(targetGradeFt - rangeFt, unit, valueInc);
+
+        const h = stripWrap.clientHeight || 220;
+        const centerY = h / 2;
+
+        const norm = clamp(currentFt / rangeFt, -1, 1);
+        const markerY = centerY - norm * (h / 2 - 6);
+        const absCur = Math.abs(currentFt);
+        const atGrade = absCur <= toleranceFt;
+
+        marker.classList.remove(
+          "grade-indicator__marker--line",
+          "grade-indicator__marker--arrow-down",
+          "grade-indicator__marker--arrow-up"
+        );
+
+        if (atGrade) {
+          marker.classList.add("grade-indicator__marker--line");
+          marker.style.top = centerY + "px";
+          marker.style.transform = "translateY(-50%)";
+        } else if (currentFt > 0) {
+          marker.classList.add("grade-indicator__marker--arrow-down");
+          marker.style.top = markerY + "px";
+          marker.style.transform = "translate(-50%, -100%)";
+        } else {
+          marker.classList.add("grade-indicator__marker--arrow-up");
+          marker.style.top = markerY + "px";
+          marker.style.transform = "translate(-50%, 0)";
+        }
+
+        const tolHalfPx = (toleranceFt / rangeFt) * (h / 2 - 6);
+        tolEl.style.top = centerY - tolHalfPx + "px";
+        tolEl.style.height = tolHalfPx * 2 + "px";
+
+        ticksEl.innerHTML = "";
+        const major = 5;
+        for (let i = 0; i <= major; i++) {
+          const t = i / major;
+          const y = t * h;
+          const tick = document.createElement("div");
+          tick.className = "grade-indicator__tick" + (i % 2 === 0 ? " grade-indicator__tick--major" : "");
+          tick.style.top = y + "px";
+          ticksEl.appendChild(tick);
+        }
+
+        valueEl.textContent = formatElevationOffset(currentFt, unit, valueInc);
+
+        valueEl.classList.remove(
+          "grade-indicator__value--ok",
+          "grade-indicator__value--warn",
+          "grade-indicator__value--bad",
+          "grade-indicator__value--above"
+        );
+        root.classList.remove("grade-indicator--on-target");
+        if (toleranceFt <= 0) {
+          valueEl.classList.add("grade-indicator__value--ok");
+        } else if (absCur <= toleranceFt) {
+          valueEl.classList.add("grade-indicator__value--ok");
+          root.classList.add("grade-indicator--on-target");
+        } else if (absCur <= toleranceFt * 2) {
+          valueEl.classList.add("grade-indicator__value--warn");
+          if (currentFt > 0) valueEl.classList.add("grade-indicator__value--above");
+        } else {
+          valueEl.classList.add("grade-indicator__value--bad");
+          if (currentFt > 0) valueEl.classList.add("grade-indicator__value--above");
+        }
+      }
+
+      function readFromDataset(root) {
+        const inc = Math.max(parseNum(root, "increment", 0.01), 1e-9);
+        let valInc = parseNum(root, "value-increment", NaN);
+        if (!Number.isFinite(valInc)) valInc = inc;
+        valInc = Math.max(valInc, 1e-9);
+        const du = root.getAttribute("data-display-unit") || root.getAttribute("data-units") || "ft";
+        return {
+          rangeFt: normalizeRange(parseNum(root, "range", 1), 1),
+          toleranceFt: Math.max(0, parseNum(root, "tolerance", 0.05)),
+          currentFt: parseNum(root, "current", 0),
+          displayUnit: normalizeUnit(du),
+          incrementFt: inc,
+          valueIncrementFt: valInc,
+          targetGradeFt: parseNum(root, "target-grade", 0),
+        };
+      }
+
+      /**
+       * @param {object} [opts]
+       * @param {number} [opts.range] — feet
+       * @param {number} [opts.tolerance] — feet
+       * @param {number} [opts.current] — feet
+       * @param {string} [opts.displayUnit] — ft | in | yd | cm | m
+       * @param {number} [opts.incrementFt] — scale step in feet
+       * @param {number} [opts.valueIncrementFt] — main value readout step in feet
+       * @param {number} [opts.targetGrade] — target elevation at center (feet)
+       */
+      function configureGradeIndicator(el, opts) {
+        if (!opts) return;
+        let repopulateScale = false;
+        if (opts.range !== undefined) el.setAttribute("data-range", String(opts.range));
+        if (opts.tolerance !== undefined) el.setAttribute("data-tolerance", String(opts.tolerance));
+        if (opts.current !== undefined) el.setAttribute("data-current", String(opts.current));
+        if (opts.displayUnit !== undefined) {
+          el.setAttribute("data-display-unit", opts.displayUnit);
+          repopulateScale = true;
+        }
+        if (opts.incrementFt !== undefined) {
+          el.setAttribute("data-increment", String(opts.incrementFt));
+          repopulateScale = true;
+        }
+        if (opts.valueIncrementFt !== undefined) {
+          el.setAttribute("data-value-increment", String(opts.valueIncrementFt));
+        }
+        if (opts.targetGrade !== undefined) {
+          el.setAttribute("data-target-grade", String(opts.targetGrade));
+        }
+        const scope = gradeControlsScope();
+        const unitSel = scope.querySelector("[data-gi-unit]");
+        const incSel = scope.querySelector("[data-gi-increment]");
+        if (unitSel) unitSel.value = readFromDataset(el).displayUnit;
+        if (unitSel && incSel) {
+          if (repopulateScale) {
+            populateIncrementSelect(el, unitSel, incSel, parseNum(el, "increment", 0.01), "increment");
+          }
+          syncIncrementFromDataset(el, incSel, "increment");
+        }
+        syncValueIncrementInput(el);
+        syncGradeInput(el);
+        updateGradeIndicator(el, readFromDataset(el));
+      }
+
+      function bindControls(root) {
+        const scope = gradeControlsScope();
+        const unitSel = scope.querySelector("[data-gi-unit]");
+        const incSel = scope.querySelector("[data-gi-increment]");
+        const valIncInput = scope.querySelector("[data-gi-value-increment]");
+        const gradeInput = scope.querySelector("[data-gi-target-grade]");
+        if (!unitSel || !incSel || !valIncInput || valIncInput.tagName !== "INPUT") return;
+        if (!gradeInput || gradeInput.tagName !== "INPUT") return;
+
+        unitSel.addEventListener("change", function () {
+          root.setAttribute("data-display-unit", unitSel.value);
+          populateIncrementSelect(root, unitSel, incSel, parseNum(root, "increment", 0.01), "increment");
+          syncIncrementFromDataset(root, incSel, "increment");
+          syncValueIncrementInput(root);
+          syncGradeInput(root);
+          updateGradeIndicator(root, readFromDataset(root));
+        });
+
+        incSel.addEventListener("change", function () {
+          const v = parseFloat(incSel.value);
+          if (Number.isFinite(v)) root.setAttribute("data-increment", String(v));
+          updateGradeIndicator(root, readFromDataset(root));
+        });
+
+        function commitValueStep() {
+          applyValueIncrementInput(root);
+        }
+
+        valIncInput.addEventListener("change", commitValueStep);
+        valIncInput.addEventListener("blur", commitValueStep);
+        valIncInput.addEventListener("keydown", function (e) {
+          var isEnter = e.key === "Enter" || e.code === "Enter" || e.code === "NumpadEnter";
+          if (!isEnter) return;
+          e.preventDefault();
+          e.stopPropagation();
+          commitValueStep();
+        });
+
+        const applyBtn = scope.querySelector("[data-gi-value-apply]");
+        if (applyBtn) {
+          applyBtn.addEventListener("click", function () {
+            commitValueStep();
+          });
+        }
+
+        function commitGrade() {
+          applyGradeInput(root);
+        }
+
+        gradeInput.addEventListener("change", commitGrade);
+        gradeInput.addEventListener("blur", commitGrade);
+        gradeInput.addEventListener("keydown", function (e) {
+          var isEnter = e.key === "Enter" || e.code === "Enter" || e.code === "NumpadEnter";
+          if (!isEnter) return;
+          e.preventDefault();
+          e.stopPropagation();
+          commitGrade();
+        });
+
+        const gradeApplyBtn = scope.querySelector("[data-gi-grade-apply]");
+        if (gradeApplyBtn) {
+          gradeApplyBtn.addEventListener("click", commitGrade);
+        }
+      }
+
+      const root = document.getElementById("gradeIndicator");
+
+      (function initControls() {
+        const scope = gradeControlsScope();
+        const unitSel = scope.querySelector("[data-gi-unit]");
+        const incSel = scope.querySelector("[data-gi-increment]");
+        const valIncInput = scope.querySelector("[data-gi-value-increment]");
+        const gradeInput = scope.querySelector("[data-gi-target-grade]");
+        if (
+          unitSel &&
+          incSel &&
+          valIncInput &&
+          valIncInput.tagName === "INPUT" &&
+          gradeInput &&
+          gradeInput.tagName === "INPUT"
+        ) {
+          unitSel.value = readFromDataset(root).displayUnit;
+          populateIncrementSelect(root, unitSel, incSel, parseNum(root, "increment", 0.01), "increment");
+          syncIncrementFromDataset(root, incSel, "increment");
+          syncValueIncrementInput(root);
+          syncGradeInput(root);
+          bindControls(root);
+        }
+      })();
+
+      function refresh() {
+        updateGradeIndicator(root, readFromDataset(root));
+      }
+
+      refresh();
+      window.addEventListener("resize", refresh);
+
+      if (root.getAttribute("data-demo") === "true") {
+        let t0 = performance.now();
+        function demoTick(now) {
+          const phase = (now - t0) / 3000;
+          const wobble = 0.18 * Math.sin(phase * Math.PI * 2);
+          root.setAttribute("data-current", (0.05 + wobble).toFixed(6));
+          refresh();
+          requestAnimationFrame(demoTick);
+        }
+        requestAnimationFrame(demoTick);
+      }
+
+      window.setGradeIndicatorCurrent = function (el, valueFeet) {
+        configureGradeIndicator(el, { current: valueFeet });
+      };
+
+      window.setGradeIndicatorRange = function (el, rangeFeet) {
+        configureGradeIndicator(el, { range: rangeFeet });
+      };
+
+      window.setGradeIndicatorTolerance = function (el, toleranceFeet) {
+        configureGradeIndicator(el, { tolerance: toleranceFeet });
+      };
+
+      window.configureGradeIndicator = configureGradeIndicator;
+
+      window.setGradeIndicatorTargetGrade = function (el, gradeFeet) {
+        configureGradeIndicator(el, { targetGrade: gradeFeet });
+      };
+    })();
+  </script>
+</body>
+</html>
